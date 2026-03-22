@@ -51,7 +51,7 @@ async function refreshPool() {
   console.log("🔄 Starting fresh proxy scan...");
   try {
     // Fetching from a secondary source as well for better diversity
-    const res = await fetch("https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt");
+    const res = await fetch("https://raw.githubusercontent.com/r00tee/Proxy-List/refs/heads/main/Socks5.txt");
     const text = await res.text();
     
     const raw = text.split("\n")
