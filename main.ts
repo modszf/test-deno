@@ -8,95 +8,75 @@ interface ProxyInfo {
 let workingProxies: ProxyInfo[] = [];
 let isInitialLoading = true;
 
-/**
- * Checks a single proxy for connectivity and latency.
- * Uses the modern fetch API with proxy support.
- */
 async function checkProxy(proxyAddr: string): Promise<ProxyInfo | null> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000); // 8 second timeout
+  const timeout = setTimeout(() => controller.abort(), 5000); 
   const startTime = performance.now();
 
   try {
-    // Note: Deno 2.0+ uses standard fetch options for proxies
-    const response = await fetch("http://ip-api.com/json/?fields=status,countryCode", {
+    // Note: In Deno 2.0+, use the 'proxy' property directly in fetch
+    const res = await fetch("http://ip-api.com/json/?fields=status,countryCode", {
       // @ts-ignore: Deno specific proxy property
       proxy: { url: proxyAddr },
       signal: controller.signal,
     });
-
-    if (!response.ok) return null;
-
-    const body = await response.json();
+    
     const endTime = performance.now();
     const latency = Math.round(endTime - startTime);
 
-    if (body && body.status === "success") {
-      return {
-        url: proxyAddr,
-        latency: `${latency}ms`,
-        country: body.countryCode || "??",
-      };
+    if (res.ok) {
+      const geoData = await res.json();
+      if (geoData.status === "success") {
+        return {
+          url: proxyAddr,
+          latency: `${latency}ms`,
+          country: geoData.countryCode || "??"
+        };
+      }
     }
     return null;
-  } catch (_err) {
+  } catch {
     return null;
   } finally {
     clearTimeout(timeout);
   }
 }
 
-/**
- * Fetches the raw list, cleans it, and runs parallel checks in chunks.
- */
 async function refreshPool() {
-  console.log(`[${new Date().toISOString()}] 🔄 Starting proxy scan...`);
-  
+  console.log("🔄 Fetching fresh proxy list...");
   try {
-    // Fetching the raw text file
+    // Using the SOCKS5 list as the source
     const res = await fetch("https://raw.githubusercontent.com/r00tee/Proxy-List/refs/heads/main/Socks5.txt");
-    if (!res.ok) throw new Error("Failed to fetch proxy list source");
-    
     const text = await res.text();
     
-    // Process the raw IP:PORT strings
-    const candidates = text.split("\n")
+    // Convert IP:PORT format to socks5://IP:PORT
+    const raw = text.split("\n")
       .map(p => p.trim())
-      // Filter out empty lines or comments
-      .filter(p => p.length > 5 && !p.startsWith("#"))
-      // Ensure the URL has the socks5:// protocol for the fetch API
-      .map(p => {
-        if (p.startsWith("socks5://")) return p;
-        // Handle potential http/https prefixes in other lists, but default to socks5
-        if (p.includes("://")) return p;
-        return `socks5://${p}`;
-      })
-      .slice(0, 300); // Sample size for performance
+      .filter(p => p.length > 5)
+      .map(p => p.includes("://") ? p : `socks5://${p}`)
+      .slice(0, 150); 
 
-    console.log(`📡 Testing ${candidates.length} candidates in chunks...`);
+    console.log(`📡 Testing ${raw.length} candidates...`);
 
-    const validResults: ProxyInfo[] = [];
-    const chunkSize = 30; // Concurrency limit
+    const results: ProxyInfo[] = [];
+    const chunkSize = 25;
     
-    for (let i = 0; i < candidates.length; i += chunkSize) {
-      const chunk = candidates.slice(i, i + chunkSize);
+    for (let i = 0; i < raw.length; i += chunkSize) {
+      const chunk = raw.slice(i, i + chunkSize);
       const chunkResults = await Promise.all(chunk.map(checkProxy));
-      
-      const successful = chunkResults.filter((p): p is ProxyInfo => p !== null);
-      validResults.push(...successful);
-      
-      console.log(`| Progress: ${Math.min(i + chunkSize, candidates.length)}/${candidates.length} | Found: ${validResults.length}`);
+      const validOnes = chunkResults.filter((p): p is ProxyInfo => p !== null);
+      results.push(...validOnes);
+      console.log(`| Checked: ${Math.min(i + chunkSize, raw.length)}/${raw.length} | Found: ${results.length}`);
     }
 
-    if (validResults.length > 0) {
-      // Sort by fastest latency
-      workingProxies = validResults.sort((a, b) => parseInt(a.latency) - parseInt(b.latency));
-      console.log(`✅ Scan Complete: ${workingProxies.length} proxies active.`);
+    if (results.length > 0) {
+      workingProxies = results.sort((a, b) => parseInt(a.latency) - parseInt(b.latency));
+      console.log(`✅ Success! Found ${workingProxies.length} working proxies.`);
     } else {
-      console.log("⚠️ No active proxies found this cycle. Keeping previous list.");
+      console.log("⚠️ No working proxies found. Keeping previous list.");
     }
   } catch (err) {
-    console.error("❌ Scan Error:", err instanceof Error ? err.message : String(err));
+    console.error("❌ Error refreshing pool:", err);
   } finally {
     isInitialLoading = false;
   }
@@ -105,33 +85,18 @@ async function refreshPool() {
 // Initial fetch
 refreshPool();
 
-// Refresh pool every 15 minutes to keep list "warm"
-setInterval(refreshPool, 15 * 60 * 1000);
+// Refresh every 10 minutes
+setInterval(refreshPool, 10 * 60 * 1000);
 
-// Start Deno Server
 Deno.serve({ port: 8000 }, (req) => {
   const headers = {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, OPTIONS",
   };
 
-  // Handle CORS preflight
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers, status: 204 });
-  }
-
-  // Health check or early return during first boot
   if (isInitialLoading && workingProxies.length === 0) {
-    return new Response(
-      JSON.stringify({ status: "loading", message: "Initial proxy scan in progress..." }), 
-      { headers, status: 202 }
-    );
+    return new Response(JSON.stringify([{ url: "loading...", latency: "0ms", country: ".." }]), { headers });
   }
 
-  // Return the sorted list of working proxies
-  return new Response(JSON.stringify(workingProxies, null, 2), { 
-    headers, 
-    status: workingProxies.length > 0 ? 200 : 503 
-  });
+  return new Response(JSON.stringify(workingProxies, null, 2), { headers });
 });
