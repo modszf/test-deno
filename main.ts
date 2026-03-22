@@ -1,7 +1,11 @@
-import { PrismaClient } from "npm:@prisma/client";
+import pkg from "npm:@prisma/client";
+const { PrismaClient } = pkg;
 
-// Initialize Prisma Client
-// Ensure your DATABASE_URL environment variable is set in Deno Deploy
+/**
+ * Note: To use Prisma with Deno Deploy and Postgres, 
+ * ensure you have run 'npx prisma generate' locally and 
+ * your DATABASE_URL is set in the Deno Deploy environment variables.
+ */
 const prisma = new PrismaClient();
 
 interface ProxyInfo {
@@ -14,18 +18,16 @@ interface ProxyInfo {
 let workingProxies: ProxyInfo[] = [];
 let isScanning = false;
 
-/**
- * Note: Deno Deploy has limitations on 'proxy' options in fetch.
- * Standard fetch on Deno Deploy might ignore the proxy object.
- */
 async function checkProxy(proxyAddr: string): Promise<ProxyInfo | null> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 4000); 
   const startTime = performance.now();
 
   try {
+    // Deno Deploy does not support Deno.createHttpClient or 'proxy' in fetch.
+    // This logic works in Deno CLI (VPS) but will likely fail or ignore proxy in Deploy.
     const res = await fetch("http://ip-api.com/json/?fields=status,countryCode", {
-      // @ts-ignore: Deno CLI specific proxy property
+      // @ts-ignore: Deno CLI specific
       proxy: { url: proxyAddr },
       signal: controller.signal,
     });
@@ -73,11 +75,9 @@ async function refreshPool() {
     if (results.length > 0) {
       workingProxies = results.sort((a, b) => parseInt(a.latency) - parseInt(b.latency));
       
-      // Save to Prisma Postgres
-      // We upsert or replace the list. Using a simple approach for this example:
       try {
-        // Clearing old proxies and inserting new ones 
-        // (Alternatively, use a single JSON field in a "Settings" table)
+        // Clear and update the Postgres database
+        // This assumes your model in schema.prisma is named 'Proxy'
         await prisma.$transaction([
           prisma.proxy.deleteMany({}),
           prisma.proxy.createMany({
@@ -88,13 +88,13 @@ async function refreshPool() {
             }))
           })
         ]);
-        console.log(`✅ Saved ${workingProxies.length} proxies to Prisma Postgres.`);
+        console.log(`✅ Database synced: ${workingProxies.length} proxies.`);
       } catch (dbErr) {
-        console.error("Database Save Error:", dbErr);
+        console.error("Database Write Error:", dbErr.message);
       }
     }
   } catch (err) {
-    console.error("Scan Error:", err);
+    console.error("Scan Error:", err.message);
   } finally {
     isScanning = false;
   }
@@ -106,38 +106,33 @@ Deno.serve(async (req) => {
     "Access-Control-Allow-Origin": "*",
   };
 
-  // 1. Try to sync memory with Postgres if memory is empty
+  // Sync memory from Postgres on boot
   if (workingProxies.length === 0) {
     try {
-      const savedProxies = await prisma.proxy.findMany({
-        orderBy: { id: 'asc' }
-      });
-      if (savedProxies.length > 0) {
-        workingProxies = savedProxies.map(p => ({
+      const saved = await prisma.proxy.findMany({});
+      if (saved.length > 0) {
+        workingProxies = saved.map(p => ({
           url: p.url,
           latency: p.latency,
           country: p.country
         }));
-        console.log("📦 Loaded proxies from Prisma Postgres");
       }
     } catch (dbErr) {
-      console.error("Database Read Error:", dbErr);
+      console.error("Database Read Error:", dbErr.message);
     }
   }
 
   const url = new URL(req.url);
   
-  // 2. Handle refresh request or initial empty state
   if (url.searchParams.get("refresh") === "true" || (workingProxies.length === 0 && !isScanning)) {
     refreshPool();
     if (workingProxies.length === 0) {
       return new Response(
-        JSON.stringify([{ url: "Scanning... please refresh in 10s", latency: "0ms", country: ".." }]), 
+        JSON.stringify([{ url: "Scanning database/web...", latency: "0ms", country: ".." }]), 
         { headers, status: 202 }
       );
     }
   }
 
-  // 3. Always return the list
   return new Response(JSON.stringify(workingProxies, null, 2), { headers });
 });
