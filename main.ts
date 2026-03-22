@@ -19,8 +19,6 @@ async function checkProxy(proxyAddr: string): Promise<ProxyInfo | null> {
 
   try {
     // Note: Deno 2.0+ uses standard fetch options for proxies
-    // If running on older Deno, createHttpClient might be required, 
-    // but the following is the standard forward-compatible way.
     const response = await fetch("http://ip-api.com/json/?fields=status,countryCode", {
       // @ts-ignore: Deno specific proxy property
       proxy: { url: proxyAddr },
@@ -55,25 +53,30 @@ async function refreshPool() {
   console.log(`[${new Date().toISOString()}] 🔄 Starting proxy scan...`);
   
   try {
-    // Fetching SOCKS5 list as requested
+    // Fetching the raw text file
     const res = await fetch("https://raw.githubusercontent.com/r00tee/Proxy-List/refs/heads/main/Socks5.txt");
     if (!res.ok) throw new Error("Failed to fetch proxy list source");
     
     const text = await res.text();
-    const rawLines = text.split("\n")
+    
+    // Process the raw IP:PORT strings
+    const candidates = text.split("\n")
       .map(p => p.trim())
-      .filter(p => p.length > 5);
-
-    // Format lines: Ensure they have a protocol. 
-    // Since the source is Socks5.txt, we prepended socks5://
-    const candidates = rawLines
-      .slice(0, 300) // Increase sample size for better probability
-      .map(p => p.startsWith("socks5://") ? p : `socks5://${p}`);
+      // Filter out empty lines or comments
+      .filter(p => p.length > 5 && !p.startsWith("#"))
+      // Ensure the URL has the socks5:// protocol for the fetch API
+      .map(p => {
+        if (p.startsWith("socks5://")) return p;
+        // Handle potential http/https prefixes in other lists, but default to socks5
+        if (p.includes("://")) return p;
+        return `socks5://${p}`;
+      })
+      .slice(0, 300); // Sample size for performance
 
     console.log(`📡 Testing ${candidates.length} candidates in chunks...`);
 
     const validResults: ProxyInfo[] = [];
-    const chunkSize = 30; // Processing 30 at a time to stay under descriptor limits
+    const chunkSize = 30; // Concurrency limit
     
     for (let i = 0; i < candidates.length; i += chunkSize) {
       const chunk = candidates.slice(i, i + chunkSize);
