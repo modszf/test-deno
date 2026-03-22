@@ -1,12 +1,14 @@
+import { PrismaClient } from "npm:@prisma/client";
+
+// Initialize Prisma Client
+// Ensure your DATABASE_URL environment variable is set in Deno Deploy
+const prisma = new PrismaClient();
+
 interface ProxyInfo {
   url: string;
   latency: string;
   country: string;
 }
-
-// Open Deno KV
-const kv = await Deno.openKv();
-const KV_KEY = ["proxies", "latest"];
 
 // Memory cache for speed
 let workingProxies: ProxyInfo[] = [];
@@ -70,8 +72,26 @@ async function refreshPool() {
 
     if (results.length > 0) {
       workingProxies = results.sort((a, b) => parseInt(a.latency) - parseInt(b.latency));
-      await kv.set(KV_KEY, workingProxies);
-      console.log(`✅ Saved ${workingProxies.length} proxies to KV.`);
+      
+      // Save to Prisma Postgres
+      // We upsert or replace the list. Using a simple approach for this example:
+      try {
+        // Clearing old proxies and inserting new ones 
+        // (Alternatively, use a single JSON field in a "Settings" table)
+        await prisma.$transaction([
+          prisma.proxy.deleteMany({}),
+          prisma.proxy.createMany({
+            data: workingProxies.map(p => ({
+              url: p.url,
+              latency: p.latency,
+              country: p.country
+            }))
+          })
+        ]);
+        console.log(`✅ Saved ${workingProxies.length} proxies to Prisma Postgres.`);
+      } catch (dbErr) {
+        console.error("Database Save Error:", dbErr);
+      }
     }
   } catch (err) {
     console.error("Scan Error:", err);
@@ -86,11 +106,22 @@ Deno.serve(async (req) => {
     "Access-Control-Allow-Origin": "*",
   };
 
-  // 1. Try to sync memory with KV if memory is empty
+  // 1. Try to sync memory with Postgres if memory is empty
   if (workingProxies.length === 0) {
-    const entry = await kv.get<ProxyInfo[]>(KV_KEY);
-    if (entry.value) {
-      workingProxies = entry.value;
+    try {
+      const savedProxies = await prisma.proxy.findMany({
+        orderBy: { id: 'asc' }
+      });
+      if (savedProxies.length > 0) {
+        workingProxies = savedProxies.map(p => ({
+          url: p.url,
+          latency: p.latency,
+          country: p.country
+        }));
+        console.log("📦 Loaded proxies from Prisma Postgres");
+      }
+    } catch (dbErr) {
+      console.error("Database Read Error:", dbErr);
     }
   }
 
@@ -99,7 +130,6 @@ Deno.serve(async (req) => {
   // 2. Handle refresh request or initial empty state
   if (url.searchParams.get("refresh") === "true" || (workingProxies.length === 0 && !isScanning)) {
     refreshPool();
-    // If we have nothing to show yet, return 202
     if (workingProxies.length === 0) {
       return new Response(
         JSON.stringify([{ url: "Scanning... please refresh in 10s", latency: "0ms", country: ".." }]), 
@@ -108,6 +138,6 @@ Deno.serve(async (req) => {
     }
   }
 
-  // 3. Always return the list (either from memory or KV)
+  // 3. Always return the list
   return new Response(JSON.stringify(workingProxies, null, 2), { headers });
 });
