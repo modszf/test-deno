@@ -4,24 +4,30 @@ interface ProxyInfo {
   country: string;
 }
 
+// Global pool of working proxies
 let workingProxies: ProxyInfo[] = [];
+let isInitialLoading = true;
 
 async function checkProxy(proxyAddr: string): Promise<ProxyInfo | null> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 4000);
-  const startTime = performance.now(); // စတင်ချိန်
+  const timeout = setTimeout(() => controller.abort(), 5000); // Increased timeout to 5s
+  const startTime = performance.now();
 
   try {
-    const client = Deno.createHttpClient({ proxy: { url: proxyAddr } });
+    const client = Deno.createHttpClient({ 
+      proxy: { url: proxyAddr },
+      // Added for better compatibility
+      allowHost: true 
+    });
     
-    // IP နှင့် နိုင်ငံကို သိနိုင်ရန် IP-API ကို အသုံးပြုခြင်း
-    const res = await fetch("http://ip-api.com/json/?fields=status,countryCode", {
+    // Using a more reliable field set for ip-api
+    const res = await fetch("http://ip-api.com/json/?fields=status,message,countryCode,query", {
       client,
       signal: controller.signal,
     });
     
-    const endTime = performance.now(); // ပြီးဆုံးချိန်
-    const latency = Math.round(endTime - startTime); // Latency တွက်ချက်ခြင်း
+    const endTime = performance.now();
+    const latency = Math.round(endTime - startTime);
 
     if (res.ok) {
       const geoData = await res.json();
@@ -44,24 +50,59 @@ async function checkProxy(proxyAddr: string): Promise<ProxyInfo | null> {
 }
 
 async function refreshPool() {
-  console.log("🔄 Proxy အသစ်များ စစ်ဆေးနေသည်...");
-  const res = await fetch("https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt");
-  const text = await res.text();
-  const raw = text.split("\n").map(p => `http://${p.trim()}`).filter(p => p.length > 10).slice(0, 30); // Speed အတွက် ၃၀ ခုပဲ အရင်စစ်မယ်
+  console.log("🔄 Fetching fresh proxy list...");
+  try {
+    const res = await fetch("https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt");
+    const text = await res.text();
+    
+    // Increased slice to 100 to get a higher chance of finding working ones
+    const raw = text.split("\n")
+      .map(p => p.trim())
+      .filter(p => p.length > 5)
+      .map(p => `http://${p}`)
+      .slice(0, 100); 
 
-  const results = await Promise.all(raw.map(checkProxy));
-  workingProxies = results.filter((p): p is ProxyInfo => p !== null);
-  console.log(`✅ အလုပ်လုပ်သော Proxy ${workingProxies.length} ခု ရှာဖွေတွေ့ရှိပါသည်။`);
+    console.log(`📡 Testing ${raw.length} candidates...`);
+
+    // Process in smaller chunks to avoid overwhelming the network
+    const results: ProxyInfo[] = [];
+    const chunkSize = 20;
+    for (let i = 0; i < raw.length; i += chunkSize) {
+      const chunk = raw.slice(i, i + chunkSize);
+      const chunkResults = await Promise.all(chunk.map(checkProxy));
+      results.push(...chunkResults.filter((p): p is ProxyInfo => p !== null));
+    }
+
+    if (results.length > 0) {
+      // Only overwrite the global pool if we actually found working proxies
+      workingProxies = results.sort((a, b) => parseInt(a.latency) - parseInt(b.latency));
+      console.log(`✅ Success! Found ${workingProxies.length} working proxies.`);
+    } else {
+      console.log("⚠️ No working proxies found in this cycle. Keeping previous list.");
+    }
+  } catch (err) {
+    console.error("❌ Error refreshing pool:", err);
+  } finally {
+    isInitialLoading = false;
+  }
 }
 
-// ၁၅ မိနစ်တစ်ခါ အသစ်ယူ၊ ၅ မိနစ်တစ်ခါ ရှိတာကို ပြန်စစ်
+// Initial fetch
 refreshPool();
-setInterval(refreshPool, 15 * 60 * 1000);
+
+// Refresh every 10 minutes
+setInterval(refreshPool, 10 * 60 * 1000);
 
 Deno.serve({ port: 8000 }, (req) => {
   const headers = {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
   };
+
+  // If still loading and pool is empty, provide a message or wait
+  if (isInitialLoading && workingProxies.length === 0) {
+    return new Response(JSON.stringify([{ url: "loading...", latency: "0ms", country: ".." }]), { headers });
+  }
+
   return new Response(JSON.stringify(workingProxies), { headers });
 });
