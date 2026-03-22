@@ -1,0 +1,17 @@
+[
+  {
+    "url": "socks5://31.211.142.115:8192",
+    "latency": "152ms",
+    "country": "DE"
+  },
+  {
+    "url": "socks5://185.151.86.86:3699",
+    "latency": "245ms",
+    "country": "FR"
+  },
+  {
+    "url": "socks5://93.184.4.254:1080",
+    "latency": "310ms",
+    "country": "US"
+  }
+]
